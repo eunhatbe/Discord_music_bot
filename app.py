@@ -59,6 +59,7 @@ async def mangerCheck(ctx):
 
 # 봇 실행
 if __name__ == "__main__":
+    # TOKEN 파일 필요
     try:
         with open("TOKEN", 'r') as f:
             TOKEN = f.readline()
