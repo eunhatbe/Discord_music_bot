@@ -1,125 +1,173 @@
-import asyncio, os
+# This example requires the 'message_content' privileged intent to function.
 
+import asyncio
+import sys
 
 import discord
+import yt_dlp as youtube_dl
+
 from discord.ext import commands
-from discord.utils import get
-from discord import FFmpegPCMAudio
-from youtube_dl import YoutubeDL
+
+# Discord _ TOKEN
+try:
+    with open("TOKEN", 'r') as f:
+        TOKEN = f.read()
+except FileNotFoundError:
+    print("Failed to open the token file.")
+    sys.exit()
 
 
-# Bot client create
-bot = commands.Bot(command_prefix='!')
+try:
+    with open("help.txt", "r", encoding="utf-8") as f:
+        help_string = f.read()
+except Exception as e:
+    print(f"An error occurred: {e}")
 
-bot_status_msg : str = "테스트"
+# Suppress noise about console usage from errors
+youtube_dl.utils.bug_reports_message = lambda: ''
 
-music_queue = []
+ytdl_format_options = {
+    'format': 'bestaudio/best',
+    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+    'restrictfilenames': True,
+    'noplaylist': True,
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
+    'logtostderr': False,
+    'quiet': True,
+    'no_warnings': True,
+    'default_search': 'auto',
+    'source_address': '0.0.0.0',  # bind to ipv4 since ipv6 addresses cause issues sometimes
+}
+
+ffmpeg_options = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn',
+}
+
+ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
 
 
-# 실행시 한번만 동작
+# youtube 음악과 로컬 음악의 재생을 구별하기 위한 클래스 작성.
+class YTDLSource(discord.PCMVolumeTransformer):
+    def __init__(self, source, *, data, volume=0.5):
+        super().__init__(source, volume)
+
+        self.data = data
+
+        self.title = data.get('title')
+        self.url = data.get('url')
+
+    @classmethod
+    async def from_url(cls, url, *, loop=None, stream=False):
+        loop = loop or asyncio.get_event_loop()
+        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
+
+        if 'entries' in data:
+            # take first item from a playlist
+            data = data['entries'][0]
+
+        filename = data['url'] if stream else ytdl.prepare_filename(data)
+        return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
+
+
+# 음악 재생 클래스. 커맨드 포함.
+class MusicBot(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.music_list = []
+
+    @commands.command()
+    async def join(self, ctx, *, channel: discord.VoiceChannel):
+        """Joins a voice channel"""
+
+        if ctx.voice_client is not None:
+            return await ctx.voice_client.move_to(channel)
+
+        await channel.connect()
+
+    @commands.command()
+    async def play(self, ctx, *, url):
+        """Streams from a url (same as yt, but doesn't predownload)"""
+
+        async with ctx.typing():
+            player = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True)
+            ctx.voice_client.play(player, after=lambda e: print(f'Player error: {e}') if e else None)
+            self.music_list.append(player.title)
+
+        await ctx.send(f'Now playing: {player.title} Volume:{int(ctx.voice_client.source.volume * 100)}%')
+
+    @commands.command()
+    async def volume(self, ctx, volume: int):
+        """Changes the player's volume"""
+
+        if ctx.voice_client is None:
+            return await ctx.send("Not connected to a voice channel.")
+
+        ctx.voice_client.source.volume = volume / 100
+        await ctx.send(f"Changed volume to {volume}%")
+
+    @commands.command()
+    async def stop(self, ctx):
+        """Stops and disconnects the bot from voice"""
+
+        await ctx.voice_client.disconnect()
+
+    @commands.command()
+    async def list(self, ctx):
+        if self.music_list:
+            response = "음악 리스트 -\n"
+            for i, music in enumerate(self.music_list, start=1):
+                response += f"{i}. {music}\n"
+                await ctx.send(response)
+        else:
+            await ctx.send("음악 리스트가 비어 있습니다.")
+
+    @commands.command()
+    async def pause(self, ctx):
+        pass
+
+    # Help
+    @commands.command()
+    async def cmd(self, ctx):
+        if help_string is not None:
+            await ctx.send(help_string)
+        else:
+            await ctx.send("도움말 오류")
+
+
+    @play.before_invoke
+    async def ensure_voice(self, ctx):
+        if ctx.voice_client is None:
+            if ctx.author.voice:
+                await ctx.author.voice.channel.connect()
+            else:
+                await ctx.send("You are not connected to a voice channel.")
+                raise commands.CommandError("Author not connected to a voice channel.")
+        elif ctx.voice_client.is_playing():
+            ctx.voice_client.stop()
+
+
+intents = discord.Intents.default()
+intents.message_content = True
+
+bot = commands.Bot(
+    command_prefix=commands.when_mentioned_or("!"),
+    description='Relatively simple music bot example',
+    intents=intents,
+)
+
+
 @bot.event
 async def on_ready():
-    print("------> Terminal onStart <---------")
-    await bot.change_presence(status=discord.Status.online, activity=discord.Game(bot_status_msg))
+    print(f'Logged in as {bot.user} (ID: {bot.user.id})')
+    print('------')
 
 
-'''
-    Event Listener
-'''
-
-# 인사
-@bot.command()
-async def hello(ctx):
-    await ctx.send('Hi there!')
-
-#관리자 권한 확인 !checkAdmin
-@bot.command(name='checkAdmin')
-async def manger_check(ctx):
-    if ctx.guild:
-        if ctx.message.author.guild_permissions.administrator:
-            await ctx.send(f'{ctx.author.mention}님은 서버의 관리자입니다.')
-        else:
-            await ctx.send(f'{ctx.author.mention}님은 서버의 관리자가 아닙니다.')
-    else:
-        await ctx.send('DM으론 불가능합니다.')
-
-# 도움말
-@bot.command(name='도움말')
-async def help_msg(ctx):
-    await ctx.send('도움말 준비중')
+async def main():
+    async with bot:
+        await bot.add_cog(MusicBot(bot))
+        await bot.start(TOKEN)
 
 
-#채널 참가
-@bot.command(name='입장')
-async def join(ctx):
-    if ctx.author.voice and ctx.author.voice.channel:
-        await ctx.author.voice.channel.connect()
-        await ctx.send('보이스 채널에 입장했습니다.')
-    else:
-        await ctx.send('음성채널 없음')
-
-
-#채널 퇴장
-@bot.command(name='퇴장')
-async def leave(ctx):
-    # 입장중인 방이 있다면 퇴장
-    if  bot.voice_clients:
-        await ctx.send('안녕히계세요!!')
-        await bot.voice_clients[0].disconnect()
-    else:
-        await ctx.send('현재 참가중인 음성 채널이 없습니다.')
-
-
-# 음악 리스트 확인
-@bot.command(name='list')
-async def music_list(ctx):
-    if music_queue:
-        for i in music_queue:
-            pass
-    else:
-        await ctx.send('음악 목록이 비어 있습니다.')
-
-
-# 음악 재생
-@bot.command(name="play")
-async def play_music(ctx, url):
-
-    voice_client = None
-
-    if ctx.message.author.voice.channel:
-        voice_channel = ctx.message.author.voice.channel
-    else:
-        await ctx.send("You are not in a voice channel")
-        return
-
-    # 입력한 url이 잘못되었다면
-    if url is None:
-        await ctx.send('url 형식이 잘못되었습니다.')
-
-    music_queue.append(url)
-
-    #봇이 음성채팅에 참여하지 않았을 경우 참여시킴
-    if bot.voice_clients == []:
-        voice_client = await voice_channel.connect()
-        await ctx.send("connected to the voice channel, " + str(bot.voice_clients[0].channel))
-
-
-    # 음악 실행
-    # if len(music_queue) == 1 and voice_client:
-    #     voice_client.play(discord.PCMVolumeTransformer(source))
-
-
-    #음악 재생 코드
-
-
-
-# 봇 실행
-if __name__ == "__main__":
-    # TOKEN 파일 필요
-    try:
-        with open("TOKEN", 'r') as f:
-            TOKEN = f.readline()
-    except FileNotFoundError:
-        print("토큰 파일이 없습니다.")
-    else:
-        bot.run(TOKEN)
+asyncio.run(main())
