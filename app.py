@@ -77,14 +77,17 @@ class MusicBot(commands.Cog):
 
     # 봇을 해당 채널에 참여시킵니다. 만약 채널을 지정하지 않을 경우 명령자에 채널로 이동합니다.
     @commands.command()
-    async def join(self, ctx, *, channel: discord.VoiceChannel):
-        if ctx.voice_client is None:
-            await channel.connect()
-            return
-        if ctx.voice_client is not None:
-            return await ctx.voice_client.move_to(channel)
-
-        await channel.connect()
+    async def join(self, ctx, *, channel: discord.VoiceChannel=None):
+        if channel is None: # 만약 !join으로 호출 했을 경우
+            if ctx.author.voice:    # 호출자가 채널에 속해 있다면
+                if ctx.voice_client is None:    # 봇이 아무채널에도 속해 있지 않다면 호출자의 채널로 입장시킨다.
+                    await ctx.author.voice.channel.connect()
+                    return
+                if ctx.voice_client is not None:    # 봇이 다른 채널에 속해있다면 호출자의 채널로 이동시킨다.
+                    return await ctx.voice_client.move_to(ctx.author.voice.channel)
+            elif not ctx.author.voice:  # 호출자가 아무 채널에도 속해있지 않다면 메세지를 보낸다.
+                await ctx.send("호출자가 현재 채널에 접속해 있지 않습니다.")
+                return
 
     # 해당 url의 음악을 재생합니다.
     @commands.command()
